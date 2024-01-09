@@ -139,6 +139,7 @@ type parseableServiceConfig struct {
 	CacheTTL              string                     `json:"cache_ttl"`
 	Host                  []string                   `json:"host"`
 	Port                  int                        `json:"port"`
+	Address               string                     `json:"listen_ip"`
 	Version               int                        `json:"version"`
 	ExtraConfig           *ExtraConfig               `json:"extra_config,omitempty"`
 	ReadTimeout           string                     `json:"read_timeout"`
@@ -162,6 +163,7 @@ type parseableServiceConfig struct {
 	Plugin                *Plugin                    `json:"plugin,omitempty"`
 	TLS                   *parseableTLS              `json:"tls,omitempty"`
 	ClientTLS             *parseableClientTLS        `json:"client_tls,omitempty"`
+	UseH2C                bool                       `json:"use_h2c,omitempty"`
 }
 
 func (p *parseableServiceConfig) normalize() ServiceConfig {
@@ -171,6 +173,7 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 		CacheTTL:              parseDuration(p.CacheTTL),
 		Host:                  p.Host,
 		Port:                  p.Port,
+		Address:               p.Address,
 		Version:               p.Version,
 		Debug:                 p.Debug,
 		Echo:                  p.Echo,
@@ -191,6 +194,7 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 		DialerKeepAlive:       parseDuration(p.DialerKeepAlive),
 		OutputEncoding:        p.OutputEncoding,
 		Plugin:                p.Plugin,
+		UseH2C:                p.UseH2C,
 	}
 	if p.TLS != nil {
 		cfg.TLS = &TLS{
@@ -216,6 +220,10 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 			MaxVersion:               p.ClientTLS.MaxVersion,
 			CurvePreferences:         p.ClientTLS.CurvePreferences,
 			CipherSuites:             p.ClientTLS.CipherSuites,
+			ClientCerts:              make([]ClientTLSCert, 0, len(p.ClientTLS.ClientCerts)),
+		}
+		for _, cc := range p.ClientTLS.ClientCerts {
+			cfg.ClientTLS.ClientCerts = append(cfg.ClientTLS.ClientCerts, ClientTLSCert(cc))
 		}
 	}
 	if p.ExtraConfig != nil {
@@ -249,13 +257,19 @@ type parseableTLS struct {
 }
 
 type parseableClientTLS struct {
-	AllowInsecureConnections bool     `json:"allow_insecure_connections"`
-	CaCerts                  []string `json:"ca_certs"`
-	DisableSystemCaPool      bool     `json:"disable_system_ca_pool"`
-	MinVersion               string   `json:"min_version"`
-	MaxVersion               string   `json:"max_version"`
-	CurvePreferences         []uint16 `json:"curve_preferences"`
-	CipherSuites             []uint16 `json:"cipher_suites"`
+	AllowInsecureConnections bool                     `json:"allow_insecure_connections"`
+	CaCerts                  []string                 `json:"ca_certs"`
+	DisableSystemCaPool      bool                     `json:"disable_system_ca_pool"`
+	MinVersion               string                   `json:"min_version"`
+	MaxVersion               string                   `json:"max_version"`
+	CurvePreferences         []uint16                 `json:"curve_preferences"`
+	CipherSuites             []uint16                 `json:"cipher_suites"`
+	ClientCerts              []parseableClientTLSCert `json:"client_certs"`
+}
+
+type parseableClientTLSCert struct {
+	Certificate string `json:"certificate"`
+	PrivateKey  string `json:"private_key"`
 }
 
 type parseableEndpointConfig struct {
@@ -354,6 +368,7 @@ type parseableBackend struct {
 	SD                       string            `json:"sd"`
 	HeadersToPass            []string          `json:"input_headers"`
 	SDScheme                 string            `json:"sd_scheme"`
+	QueryStringsToPass       []string          `json:"input_query_strings"`
 }
 
 func (p *parseableBackend) normalize() *Backend {
@@ -372,6 +387,7 @@ func (p *parseableBackend) normalize() *Backend {
 		AllowList:                p.AllowList,
 		DenyList:                 p.DenyList,
 		HeadersToPass:            p.HeadersToPass,
+		QueryStringsToPass:       p.QueryStringsToPass,
 	}
 	if b.SDScheme == "" {
 		b.SDScheme = "http"

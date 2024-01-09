@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/textproto"
 	"regexp"
@@ -56,6 +57,8 @@ type ServiceConfig struct {
 	Host []string `mapstructure:"host"`
 	// port to bind the lura service
 	Port int `mapstructure:"port"`
+	// address to listen
+	Address string `mapstructure:"listen_ip"`
 	// version code of the configuration
 	Version int `mapstructure:"version"`
 	// OutputEncoding defines the default encoding strategy to use for the endpoint responses
@@ -157,10 +160,13 @@ type ServiceConfig struct {
 	// the router layer
 	TLS *TLS `mapstructure:"tls"`
 
+	// UseH2C enables h2c support.
+	UseH2C bool `mapstructure:"use_h2c"`
+
 	// run lura in debug mode
 	Debug     bool `mapstructure:"debug_endpoint"`
 	Echo      bool `mapstructure:"echo_endpoint"`
-	uriParser URIParser
+	uriParser SafeURIParser
 
 	// SequentialStart flags if the agents should be started sequentially
 	// before starting the router
@@ -272,6 +278,8 @@ type Backend struct {
 	ExtraConfig ExtraConfig `mapstructure:"extra_config"`
 	// HeadersToPass defines the list of headers to pass to this backend
 	HeadersToPass []string `mapstructure:"input_headers"`
+	// QueryStringsToPass has the list of query string params to be sent to the backend
+	QueryStringsToPass []string `mapstructure:"input_query_strings"`
 }
 
 // Plugin contains the config required by the plugin module
@@ -297,13 +305,21 @@ type TLS struct {
 
 // ClientTLS defines the configuration params for an HTTP Client
 type ClientTLS struct {
-	AllowInsecureConnections bool     `mapstructure:"allow_insecure_connections"`
-	CaCerts                  []string `mapstructure:"ca_certs"`
-	DisableSystemCaPool      bool     `mapstructure:"disable_system_ca_pool"`
-	MinVersion               string   `mapstructure:"min_version"`
-	MaxVersion               string   `mapstructure:"max_version"`
-	CurvePreferences         []uint16 `mapstructure:"curve_preferences"`
-	CipherSuites             []uint16 `mapstructure:"cipher_suites"`
+	AllowInsecureConnections bool            `mapstructure:"allow_insecure_connections"`
+	CaCerts                  []string        `mapstructure:"ca_certs"`
+	DisableSystemCaPool      bool            `mapstructure:"disable_system_ca_pool"`
+	MinVersion               string          `mapstructure:"min_version"`
+	MaxVersion               string          `mapstructure:"max_version"`
+	CurvePreferences         []uint16        `mapstructure:"curve_preferences"`
+	CipherSuites             []uint16        `mapstructure:"cipher_suites"`
+	ClientCerts              []ClientTLSCert `mapstructure:"client_certs"`
+}
+
+// ClientTLSCert holds a certificate with its private key to be
+// used for mTLS against the backend services
+type ClientTLSCert struct {
+	Certificate string `mapstructure:"certificate"`
+	PrivateKey  string `mapstructure:"private_key"`
 }
 
 // ExtraConfig is a type to store extra configurations for customized behaviours
@@ -361,7 +377,7 @@ func (s *ServiceConfig) Hash() (string, error) {
 // Init also sanitizes the values, applies the default ones whenever necessary and
 // normalizes all the things.
 func (s *ServiceConfig) Init() error {
-	s.uriParser = NewURIParser()
+	s.uriParser = NewSafeURIParser()
 
 	if s.Version != ConfigVersion {
 		return &UnsupportedVersionError{
@@ -370,9 +386,13 @@ func (s *ServiceConfig) Init() error {
 		}
 	}
 
-	s.initGlobalParams()
+	if err := s.initGlobalParams(); err != nil {
+		return err
+	}
 
-	s.initAsyncAgents()
+	if err := s.initAsyncAgents(); err != nil {
+		return err
+	}
 
 	return s.initEndpoints()
 }
@@ -393,10 +413,17 @@ func (s *ServiceConfig) Normalize() {
 	}
 }
 
-func (s *ServiceConfig) initGlobalParams() {
+func (s *ServiceConfig) initGlobalParams() error {
 	if s.Port == 0 {
 		s.Port = defaultPort
 	}
+
+	if s.Address != "" {
+		if !validateAddress(s.Address) {
+			return fmt.Errorf("invalid ip address %s", s.Address)
+		}
+	}
+
 	if s.MaxIdleConnsPerHost == 0 {
 		s.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
 	}
@@ -404,8 +431,13 @@ func (s *ServiceConfig) initGlobalParams() {
 		s.Timeout = DefaultTimeout
 	}
 
-	s.Host = s.uriParser.CleanHosts(s.Host)
+	var err error
+	s.Host, err = s.uriParser.SafeCleanHosts(s.Host)
+	if err != nil {
+		return err
+	}
 	s.ExtraConfig.sanitize()
+	return nil
 }
 
 func (s *ServiceConfig) initAsyncAgents() error {
@@ -418,7 +450,11 @@ func (s *ServiceConfig) initAsyncAgents() error {
 			if len(b.Host) == 0 {
 				b.Host = s.Host
 			} else if !b.HostSanitizationDisabled {
-				b.Host = s.uriParser.CleanHosts(b.Host)
+				var err error
+				b.Host, err = s.uriParser.SafeCleanHosts(b.Host)
+				if err != nil {
+					return err
+				}
 			}
 			if b.Method == "" {
 				b.Method = http.MethodGet
@@ -461,7 +497,9 @@ func (s *ServiceConfig) initEndpoints() error {
 		e.ExtraConfig.sanitize()
 
 		for j, b := range e.Backend {
-			s.initBackendDefaults(i, j)
+			if err := s.initBackendDefaults(i, j); err != nil {
+				return err
+			}
 
 			if err := s.initBackendURLMappings(i, j, inputSet); err != nil {
 				return err
@@ -525,13 +563,17 @@ func (s *ServiceConfig) initAsyncAgentDefaults(e int) {
 	}
 }
 
-func (s *ServiceConfig) initBackendDefaults(e, b int) {
+func (s *ServiceConfig) initBackendDefaults(e, b int) error {
 	endpoint := s.Endpoints[e]
 	backend := endpoint.Backend[b]
 	if len(backend.Host) == 0 {
 		backend.Host = s.Host
 	} else if !backend.HostSanitizationDisabled {
-		backend.Host = s.uriParser.CleanHosts(backend.Host)
+		var err error
+		backend.Host, err = s.uriParser.SafeCleanHosts(backend.Host)
+		if err != nil {
+			return err
+		}
 	}
 	if backend.Method == "" {
 		backend.Method = endpoint.Method
@@ -549,6 +591,7 @@ func (s *ServiceConfig) initBackendDefaults(e, b int) {
 	if backend.SDScheme == "" {
 		backend.SDScheme = "http"
 	}
+	return nil
 }
 
 func (s *ServiceConfig) initBackendURLMappings(e, b int, inputParams map[string]interface{}) error {
@@ -742,4 +785,9 @@ func SetSequentialParamsPattern(pattern string) error {
 	}
 	sequentialParamsPattern = re
 	return nil
+}
+
+func validateAddress(address string) bool {
+	ip := net.ParseIP(address)
+	return ip != nil
 }

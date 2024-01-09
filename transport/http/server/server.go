@@ -20,6 +20,8 @@ import (
 	"github.com/luraproject/lura/v2/config"
 	"github.com/luraproject/lura/v2/core"
 	"github.com/luraproject/lura/v2/logging"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 // ToHTTPError translates an error into a HTTP status code
@@ -67,28 +69,35 @@ func InitHTTPDefaultTransportWithLogger(cfg config.ServiceConfig, logger logging
 		logger = logging.NoOp
 	}
 	if cfg.AllowInsecureConnections {
+		if cfg.ClientTLS == nil {
+			cfg.ClientTLS = &config.ClientTLS{}
+		}
 		cfg.ClientTLS.AllowInsecureConnections = true
 	}
 	onceTransportConfig.Do(func() {
-		http.DefaultTransport = &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:       cfg.DialerTimeout,
-				KeepAlive:     cfg.DialerKeepAlive,
-				FallbackDelay: cfg.DialerFallbackDelay,
-				DualStack:     true,
-			}).DialContext,
-			DisableCompression:    cfg.DisableCompression,
-			DisableKeepAlives:     cfg.DisableKeepAlives,
-			MaxIdleConns:          cfg.MaxIdleConns,
-			MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
-			IdleConnTimeout:       cfg.IdleConnTimeout,
-			ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
-			ExpectContinueTimeout: cfg.ExpectContinueTimeout,
-			TLSHandshakeTimeout:   10 * time.Second,
-			TLSClientConfig:       ParseClientTLSConfigWithLogger(cfg.ClientTLS, logger),
-		}
+		http.DefaultTransport = newTransport(cfg, logger)
 	})
+}
+
+func newTransport(cfg config.ServiceConfig, logger logging.Logger) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:       cfg.DialerTimeout,
+			KeepAlive:     cfg.DialerKeepAlive,
+			FallbackDelay: cfg.DialerFallbackDelay,
+			DualStack:     true,
+		}).DialContext,
+		DisableCompression:    cfg.DisableCompression,
+		DisableKeepAlives:     cfg.DisableKeepAlives,
+		MaxIdleConns:          cfg.MaxIdleConns,
+		MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
+		IdleConnTimeout:       cfg.IdleConnTimeout,
+		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+		ExpectContinueTimeout: cfg.ExpectContinueTimeout,
+		TLSHandshakeTimeout:   10 * time.Second,
+		TLSClientConfig:       ParseClientTLSConfigWithLogger(cfg.ClientTLS, logger),
+	}
 }
 
 // RunServer runs a http.Server with the given handler and configuration.
@@ -133,8 +142,12 @@ func NewServer(cfg config.ServiceConfig, handler http.Handler) *http.Server {
 }
 
 func NewServerWithLogger(cfg config.ServiceConfig, handler http.Handler, logger logging.Logger) *http.Server {
+	if cfg.UseH2C {
+		handler = h2c.NewHandler(handler, &http2.Server{})
+	}
+
 	return &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Addr:              net.JoinHostPort(cfg.Address, fmt.Sprintf("%d", cfg.Port)),
 		Handler:           handler,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -197,6 +210,7 @@ func ParseClientTLSConfigWithLogger(cfg *config.ClientTLS, logger logging.Logger
 		MaxVersion:         parseTLSVersion(cfg.MaxVersion),
 		CurvePreferences:   parseCurveIDs(cfg.CurvePreferences),
 		CipherSuites:       parseCipherSuites(cfg.CipherSuites),
+		Certificates:       loadClientCerts(cfg.ClientCerts, logger),
 	}
 }
 
@@ -218,6 +232,21 @@ func loadCertPool(disableSystemCaPool bool, caCerts []string, logger logging.Log
 		}
 	}
 	return certPool
+}
+
+func loadClientCerts(certFiles []config.ClientTLSCert, logger logging.Logger) []tls.Certificate {
+	certs := make([]tls.Certificate, 0, len(certFiles))
+	for _, certAndKey := range certFiles {
+		cert, err := tls.LoadX509KeyPair(certAndKey.Certificate, certAndKey.PrivateKey)
+		if err != nil {
+			logger.Error(fmt.Sprintf("%s Cannot load client certificate %s, %s: %s",
+				loggerPrefix, certAndKey.Certificate, certAndKey.PrivateKey, err.Error()))
+			continue
+		}
+		certs = append(certs, cert)
+	}
+
+	return certs
 }
 
 func parseTLSVersion(key string) uint16 {
