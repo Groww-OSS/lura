@@ -5,6 +5,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,10 +19,11 @@ import (
 func NewMergeDataMiddleware(logger logging.Logger, endpointConfig *config.EndpointConfig) Middleware {
 	totalBackends := len(endpointConfig.Backend)
 	if totalBackends == 0 {
-		panic(ErrNoBackends)
+		logger.Fatal("all endpoints must have at least one backend: NewMergeDataMiddleware")
+		return nil
 	}
 	if totalBackends == 1 {
-		return EmptyMiddleware
+		return emptyMiddlewareFallback(logger)
 	}
 	serviceTimeout := time.Duration(85*endpointConfig.Timeout.Nanoseconds()/100) * time.Nanosecond
 	combiner := getResponseCombiner(endpointConfig.ExtraConfig)
@@ -39,23 +41,32 @@ func NewMergeDataMiddleware(logger logging.Logger, endpointConfig *config.Endpoi
 
 	return func(next ...Proxy) Proxy {
 		if len(next) != totalBackends {
-			panic(ErrNotEnoughProxies)
+			// we leave the panic here, because we do not want to continue
+			// if this configuration is wrong, as it would lead to unexpected
+			// behaviour.
+			logger.Fatal("not enough proxies for this endpoint: NewMergeDataMiddleware")
+			return nil
+		}
+		reqClone := func(r *Request) *Request { return r }
+
+		if hasUnsafeBackends(endpointConfig) {
+			reqClone = CloneRequest
 		}
 
 		if !isSequential {
-			return parallelMerge(serviceTimeout, combiner, next...)
+			return parallelMerge(reqClone, serviceTimeout, combiner, next...)
 		}
 
 		patterns := make([]string, len(endpointConfig.Backend))
 		for i, b := range endpointConfig.Backend {
 			patterns[i] = b.URLPattern
 		}
-		return sequentialMerge(patterns, serviceTimeout, combiner, next...)
+		return sequentialMerge(reqClone, patterns, serviceTimeout, combiner, next...)
 	}
 }
 
-func shouldRunSequentialMerger(endpointConfig *config.EndpointConfig) bool {
-	if v, ok := endpointConfig.ExtraConfig[Namespace]; ok {
+func shouldRunSequentialMerger(cfg *config.EndpointConfig) bool {
+	if v, ok := cfg.ExtraConfig[Namespace]; ok {
 		if e, ok := v.(map[string]interface{}); ok {
 			if v, ok := e[isSequentialKey]; ok {
 				c, ok := v.(bool)
@@ -66,7 +77,24 @@ func shouldRunSequentialMerger(endpointConfig *config.EndpointConfig) bool {
 	return false
 }
 
-func parallelMerge(timeout time.Duration, rc ResponseCombiner, next ...Proxy) Proxy {
+func hasUnsafeBackends(cfg *config.EndpointConfig) bool {
+	if len(cfg.Backend) == 1 {
+		return false
+	}
+
+	hasOneUnsafe := false
+	for _, b := range cfg.Backend {
+		if m := strings.ToUpper(b.Method); m != http.MethodGet && m != http.MethodHead {
+			if hasOneUnsafe {
+				return true
+			}
+			hasOneUnsafe = true
+		}
+	}
+	return false
+}
+
+func parallelMerge(reqCloner func(*Request) *Request, timeout time.Duration, rc ResponseCombiner, next ...Proxy) Proxy {
 	return func(ctx context.Context, request *Request) (*Response, error) {
 		localCtx, cancel := context.WithTimeout(ctx, timeout)
 
@@ -74,7 +102,7 @@ func parallelMerge(timeout time.Duration, rc ResponseCombiner, next ...Proxy) Pr
 		failed := make(chan error, len(next))
 
 		for _, n := range next {
-			go requestPart(localCtx, n, request, parts, failed)
+			go requestPart(localCtx, n, reqCloner(request), parts, failed)
 		}
 
 		acc := newIncrementalMergeAccumulator(len(next), rc)
@@ -93,9 +121,9 @@ func parallelMerge(timeout time.Duration, rc ResponseCombiner, next ...Proxy) Pr
 	}
 }
 
-var reMergeKey = regexp.MustCompile(`\{\{\.Resp(\d+)_([\d\w-_\.]+)\}\}`)
+var reMergeKey = regexp.MustCompile(`\{\{\.Resp(\d+)_([\w-\.]+)\}\}`)
 
-func sequentialMerge(patterns []string, timeout time.Duration, rc ResponseCombiner, next ...Proxy) Proxy {
+func sequentialMerge(reqCloner func(*Request) *Request, patterns []string, timeout time.Duration, rc ResponseCombiner, next ...Proxy) Proxy {
 	return func(ctx context.Context, request *Request) (*Response, error) {
 		localCtx, cancel := context.WithTimeout(ctx, timeout)
 
@@ -164,7 +192,9 @@ func sequentialMerge(patterns []string, timeout time.Duration, rc ResponseCombin
 					}
 				}
 			}
-			sequentialRequestPart(localCtx, n, request, out, errCh)
+
+			sequentialRequestPart(localCtx, n, reqCloner(request), out, errCh)
+
 			select {
 			case err := <-errCh:
 				if i == 0 {
