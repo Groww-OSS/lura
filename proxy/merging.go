@@ -47,7 +47,7 @@ func NewMergeDataMiddleware(logger logging.Logger, endpointConfig *config.Endpoi
 			logger.Fatal("not enough proxies for this endpoint: NewMergeDataMiddleware")
 			return nil
 		}
-		reqClone := func(r *Request) *Request { return r }
+		reqClone := func(r *Request) *Request { res := r.Clone(); return &res }
 
 		if hasUnsafeBackends(endpointConfig) {
 			reqClone = CloneRequest
@@ -82,15 +82,12 @@ func hasUnsafeBackends(cfg *config.EndpointConfig) bool {
 		return false
 	}
 
-	hasOneUnsafe := false
 	for _, b := range cfg.Backend {
 		if m := strings.ToUpper(b.Method); m != http.MethodGet && m != http.MethodHead {
-			if hasOneUnsafe {
-				return true
-			}
-			hasOneUnsafe = true
+			return true
 		}
 	}
+
 	return false
 }
 
