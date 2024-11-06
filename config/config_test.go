@@ -211,7 +211,7 @@ func TestConfig_init(t *testing.T) {
 		t.Error(err.Error())
 	}
 
-	if hash != "GdZTJtCn9ZHj3iBR1ZxmZL65HjbTCU8HhbDG8YWudAo=" {
+	if hash != "mIfuGTgHS91DJtAE6KMVl2kcluxCzc9n3f6fi0YgWs8=" {
 		t.Errorf("unexpected hash: %s", hash)
 	}
 }
@@ -305,6 +305,35 @@ func TestConfig_initKOInvalidDebugPattern(t *testing.T) {
 	if err := subject.Init(); err == nil ||
 		err.Error() != "ignoring the 'GET /__debug/supu' endpoint due to a parsing error: error parsing regexp: missing closing ): `a(b`" {
 		t.Error("Expecting an error at the configuration init!", err)
+	}
+
+	invalidPattern = dp
+}
+
+func TestConfig_initKOValidSetinvalidPattern(t *testing.T) {
+	dp := invalidPattern
+
+	invalidPattern = `^[^/]|/__(debug|echo|health)(/.*)?$`
+	subject := ServiceConfig{
+		Version: ConfigVersion,
+		Host:    []string{"http://127.0.0.1:8080"},
+		Endpoints: []*EndpointConfig{
+			{
+				Endpoint: "/*",
+				Method:   "GET",
+				Backend: []*Backend{
+					{
+						URLPattern: "/",
+						Host:       []string{"https://api.github.com"},
+						AllowList:  []string{"authorizations_url", "code_search_url"},
+					},
+				},
+			},
+		},
+	}
+
+	if err := subject.Init(); err != nil {
+		t.Error(err)
 	}
 
 	invalidPattern = dp

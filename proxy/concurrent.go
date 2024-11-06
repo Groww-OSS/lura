@@ -5,6 +5,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/luraproject/lura/v2/config"
@@ -14,14 +15,16 @@ import (
 // NewConcurrentMiddlewareWithLogger creates a proxy middleware that enables sending several requests concurrently
 func NewConcurrentMiddlewareWithLogger(logger logging.Logger, remote *config.Backend) Middleware {
 	if remote.ConcurrentCalls == 1 {
-		logger.Fatal("too few concurrent calls: NewConcurrentMiddleware expects more than 1 concurrent call, got %d", remote.ConcurrentCalls)
+		logger.Fatal(fmt.Sprintf("too few concurrent calls for %s %s -> %s: NewConcurrentMiddleware expects more than 1 concurrent call, got %d",
+			remote.ParentEndpointMethod, remote.ParentEndpoint, remote.URLPattern, remote.ConcurrentCalls))
 		return nil
 	}
 	serviceTimeout := time.Duration(75*remote.Timeout.Nanoseconds()/100) * time.Nanosecond
 
 	return func(next ...Proxy) Proxy {
 		if len(next) > 1 {
-			logger.Fatal("too many proxies for this proxy middleware: NewConcurrentMiddleware only accepts 1 proxy, got %d", len(next))
+			logger.Fatal(fmt.Sprintf("too many proxies for this %s %s -> %s proxy middleware: NewConcurrentMiddleware only accepts 1 proxy, got %d",
+				remote.ParentEndpointMethod, remote.ParentEndpoint, remote.URLPattern, len(next)))
 			return nil
 		}
 
@@ -66,7 +69,7 @@ var errNullResult = errors.New("invalid response")
 func processConcurrentCall(ctx context.Context, next Proxy, request *Request, out chan<- *Response, failed chan<- error) {
 	localCtx, cancel := context.WithCancel(ctx)
 
-	result, err := next(localCtx, request)
+	result, err := next(localCtx, CloneRequest(request))
 	if err != nil {
 		failed <- err
 		cancel()

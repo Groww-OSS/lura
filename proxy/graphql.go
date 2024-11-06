@@ -28,7 +28,7 @@ func NewGraphQLMiddleware(logger logging.Logger, remote *config.Backend) Middlew
 	if err != nil {
 		if err != graphql.ErrNoConfigFound {
 			logger.Warning(
-				fmt.Sprintf("[BACKEND: %s][GraphQL] %s", remote.URLPattern, err.Error()))
+				fmt.Sprintf("[BACKEND: %s %s -> %s][GraphQL] %s", remote.ParentEndpoint, remote.ParentEndpoint, remote.URLPattern, err.Error()))
 		}
 		return emptyMiddlewareFallback(logger)
 	}
@@ -68,13 +68,16 @@ func NewGraphQLMiddleware(logger logging.Logger, remote *config.Backend) Middlew
 
 	return func(next ...Proxy) Proxy {
 		if len(next) > 1 {
-			logger.Fatal("too many proxies for this proxy middleware: NewGraphQLMiddleware only accepts 1 proxy, got %d", len(next))
+			logger.Fatal("too many proxies for this %s %s -> %s proxy middleware: NewGraphQLMiddleware only accepts 1 proxy, got %d",
+				remote.ParentEndpointMethod, remote.ParentEndpoint, remote.URLPattern, len(next))
 			return nil
 		}
 
 		logger.Debug(
 			fmt.Sprintf(
-				"[BACKEND: %s][GraphQL] Operation: %s, Method: %s",
+				"[BACKEND: %s %s -> %s][GraphQL] Operation: %s, Method: %s",
+				remote.ParentEndpointMethod,
+				remote.ParentEndpoint,
 				remote.URLPattern,
 				opt.Type,
 				opt.Method,

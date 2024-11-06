@@ -89,6 +89,12 @@ type ServiceConfig struct {
 	// after reading the headers and the Handler can decide what
 	// is considered too slow for the body.
 	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
+	// MaxHeaderBytes controls the maximum number of bytes the
+	// server will read parsing the request header's keys and
+	// values, including the request line. It does not limit the
+	// size of the request body.
+	// If zero, DefaultMaxHeaderBytes (1MB) is used.
+	MaxHeaderBytes int `mapstructure:"max_header_bytes"`
 
 	// DisableKeepAlives, if true, prevents re-use of TCP connections
 	// between different HTTP requests.
@@ -179,6 +185,9 @@ type ServiceConfig struct {
 	// ClientTLS is used to configure the http default transport
 	// with TLS parameters
 	ClientTLS *ClientTLS `mapstructure:"client_tls"`
+
+	// DNSCacheTTL is the duration of the cached data for the DNS lookups
+	DNSCacheTTL time.Duration `mapstructure:"dns_cache_ttl"`
 }
 
 // AsyncAgent defines the configuration of a single subscriber/consumer to be initialized
@@ -280,6 +289,15 @@ type Backend struct {
 	HeadersToPass []string `mapstructure:"input_headers"`
 	// QueryStringsToPass has the list of query string params to be sent to the backend
 	QueryStringsToPass []string `mapstructure:"input_query_strings"`
+
+	// ParentEndpoint is to be filled by the parent endpoint with its pattern enpoint
+	// so logs and other instrumentation can output better info (thus, it is not loaded
+	// with `mapstructure` or `json` tags).
+	ParentEndpoint string `json:"-" mapstructure:"-"`
+	// ParentEndpointMethod is to be filled by the parent endpoint with its enpoint method
+	// so logs and other instrumentation can output better info (thus, it is not loaded
+	// with `mapstructure` or `json` tags).
+	ParentEndpointMethod string `json:"-" mapstructure:"-"`
 }
 
 // Plugin contains the config required by the plugin module
@@ -288,19 +306,26 @@ type Plugin struct {
 	Pattern string `mapstructure:"pattern"`
 }
 
+// TLSKeyPair contains a pair of public and private keys
+type TLSKeyPair struct {
+	PublicKey  string `mapstructure:"public_key"`
+	PrivateKey string `mapstructure:"private_key"`
+}
+
 // TLS defines the configuration params for enabling TLS (HTTPS & HTTP/2) at the router layer
 type TLS struct {
-	IsDisabled               bool     `mapstructure:"disabled"`
-	PublicKey                string   `mapstructure:"public_key"`
-	PrivateKey               string   `mapstructure:"private_key"`
-	CaCerts                  []string `mapstructure:"ca_certs"`
-	MinVersion               string   `mapstructure:"min_version"`
-	MaxVersion               string   `mapstructure:"max_version"`
-	CurvePreferences         []uint16 `mapstructure:"curve_preferences"`
-	PreferServerCipherSuites bool     `mapstructure:"prefer_server_cipher_suites"`
-	CipherSuites             []uint16 `mapstructure:"cipher_suites"`
-	EnableMTLS               bool     `mapstructure:"enable_mtls"`
-	DisableSystemCaPool      bool     `mapstructure:"disable_system_ca_pool"`
+	IsDisabled               bool         `mapstructure:"disabled"`
+	PublicKey                string       `mapstructure:"public_key"`
+	PrivateKey               string       `mapstructure:"private_key"`
+	CaCerts                  []string     `mapstructure:"ca_certs"`
+	MinVersion               string       `mapstructure:"min_version"`
+	MaxVersion               string       `mapstructure:"max_version"`
+	CurvePreferences         []uint16     `mapstructure:"curve_preferences"`
+	PreferServerCipherSuites bool         `mapstructure:"prefer_server_cipher_suites"`
+	CipherSuites             []uint16     `mapstructure:"cipher_suites"`
+	EnableMTLS               bool         `mapstructure:"enable_mtls"`
+	DisableSystemCaPool      bool         `mapstructure:"disable_system_ca_pool"`
+	Keys                     []TLSKeyPair `mapstructure:"keys"`
 }
 
 // ClientTLS defines the configuration params for an HTTP Client
@@ -497,6 +522,9 @@ func (s *ServiceConfig) initEndpoints() error {
 		e.ExtraConfig.sanitize()
 
 		for j, b := range e.Backend {
+			// we "tell" the backend which is his parent endpoint
+			b.ParentEndpoint = e.Endpoint
+			b.ParentEndpointMethod = e.Method
 			if err := s.initBackendDefaults(i, j); err != nil {
 				return err
 			}
@@ -785,6 +813,11 @@ func SetSequentialParamsPattern(pattern string) error {
 	}
 	sequentialParamsPattern = re
 	return nil
+}
+
+// SetInvalidPattern sets the invalidPattern variable to the provided value.
+func SetInvalidPattern(pattern string) {
+	invalidPattern = pattern
 }
 
 func validateAddress(address string) bool {

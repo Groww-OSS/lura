@@ -146,6 +146,7 @@ type parseableServiceConfig struct {
 	WriteTimeout          string                     `json:"write_timeout"`
 	IdleTimeout           string                     `json:"idle_timeout"`
 	ReadHeaderTimeout     string                     `json:"read_header_timeout"`
+	MaxHeaderBytes        int                        `json:"max_header_bytes"`
 	DisableKeepAlives     bool                       `json:"disable_keep_alives"`
 	DisableCompression    bool                       `json:"disable_compression"`
 	DisableStrictREST     bool                       `json:"disable_rest"`
@@ -164,6 +165,7 @@ type parseableServiceConfig struct {
 	TLS                   *parseableTLS              `json:"tls,omitempty"`
 	ClientTLS             *parseableClientTLS        `json:"client_tls,omitempty"`
 	UseH2C                bool                       `json:"use_h2c,omitempty"`
+	DNSCacheTTL           string                     `json:"dns_cache_ttl"`
 }
 
 func (p *parseableServiceConfig) normalize() ServiceConfig {
@@ -181,6 +183,7 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 		WriteTimeout:          parseDuration(p.WriteTimeout),
 		IdleTimeout:           parseDuration(p.IdleTimeout),
 		ReadHeaderTimeout:     parseDuration(p.ReadHeaderTimeout),
+		MaxHeaderBytes:        p.MaxHeaderBytes,
 		DisableKeepAlives:     p.DisableKeepAlives,
 		DisableCompression:    p.DisableCompression,
 		DisableStrictREST:     p.DisableStrictREST,
@@ -195,6 +198,7 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 		OutputEncoding:        p.OutputEncoding,
 		Plugin:                p.Plugin,
 		UseH2C:                p.UseH2C,
+		DNSCacheTTL:           parseDuration(p.DNSCacheTTL),
 	}
 	if p.TLS != nil {
 		cfg.TLS = &TLS{
@@ -209,6 +213,9 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 			CipherSuites:             p.TLS.CipherSuites,
 			EnableMTLS:               p.TLS.EnableMTLS,
 			DisableSystemCaPool:      p.TLS.DisableSystemCaPool,
+		}
+		for _, k := range p.TLS.Keys {
+			cfg.TLS.Keys = append(cfg.TLS.Keys, TLSKeyPair(k))
 		}
 	}
 	if p.ClientTLS != nil {
@@ -242,18 +249,24 @@ func (p *parseableServiceConfig) normalize() ServiceConfig {
 	return cfg
 }
 
+type parseableTLSKeyPair struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
 type parseableTLS struct {
-	IsDisabled               bool     `json:"disabled"`
-	PublicKey                string   `json:"public_key"`
-	PrivateKey               string   `json:"private_key"`
-	CaCerts                  []string `json:"ca_certs"`
-	MinVersion               string   `json:"min_version"`
-	MaxVersion               string   `json:"max_version"`
-	CurvePreferences         []uint16 `json:"curve_preferences"`
-	PreferServerCipherSuites bool     `json:"prefer_server_cipher_suites"`
-	CipherSuites             []uint16 `json:"cipher_suites"`
-	EnableMTLS               bool     `json:"enable_mtls"`
-	DisableSystemCaPool      bool     `json:"disable_system_ca_pool"`
+	IsDisabled               bool                  `json:"disabled"`
+	PublicKey                string                `json:"public_key"`
+	PrivateKey               string                `json:"private_key"`
+	CaCerts                  []string              `json:"ca_certs"`
+	MinVersion               string                `json:"min_version"`
+	MaxVersion               string                `json:"max_version"`
+	CurvePreferences         []uint16              `json:"curve_preferences"`
+	PreferServerCipherSuites bool                  `json:"prefer_server_cipher_suites"`
+	CipherSuites             []uint16              `json:"cipher_suites"`
+	EnableMTLS               bool                  `json:"enable_mtls"`
+	DisableSystemCaPool      bool                  `json:"disable_system_ca_pool"`
+	Keys                     []parseableTLSKeyPair `json:"keys"`
 }
 
 type parseableClientTLS struct {
