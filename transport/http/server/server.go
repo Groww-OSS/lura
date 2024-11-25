@@ -80,7 +80,7 @@ func InitHTTPDefaultTransportWithLogger(cfg config.ServiceConfig, logger logging
 }
 
 func newTransport(cfg config.ServiceConfig, logger logging.Logger) *http.Transport {
-	return &http.Transport{
+	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:       cfg.DialerTimeout,
@@ -98,6 +98,32 @@ func newTransport(cfg config.ServiceConfig, logger logging.Logger) *http.Transpo
 		TLSHandshakeTimeout:   10 * time.Second,
 		TLSClientConfig:       ParseClientTLSConfigWithLogger(cfg.ClientTLS, logger),
 	}
+	if cfg.UseH2C {
+		transport.RegisterProtocol("h2c", newh2cTransport(cfg))
+	}
+	return transport
+}
+
+func newh2cTransport(cfg config.ServiceConfig) http.RoundTripper {
+	return &h2cTransportWrapper{&http2.Transport{
+		DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return net.Dial(network, addr)
+		},
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return net.Dial(network, addr)
+		},
+		AllowHTTP:       true,
+		IdleConnTimeout: cfg.IdleConnTimeout,
+	}}
+}
+
+type h2cTransportWrapper struct {
+	*http2.Transport
+}
+
+func (t *h2cTransportWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Scheme = "http"
+	return t.Transport.RoundTrip(req)
 }
 
 // RunServer runs a http.Server with the given handler and configuration.
